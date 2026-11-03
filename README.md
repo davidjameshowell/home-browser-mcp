@@ -37,14 +37,14 @@ On the machine at home you want to browse through:
 #### 🍏 macOS / 🐧 Linux / 🥧 Raspberry Pi:
 ```bash
 # (On a bare minimal Linux/Proxmox server without git, run: apt update && apt install -y git)
-git clone https://github.com/onlinegill/home-browser-mcp.git
+git clone https://github.com/davidjameshowell/home-browser-mcp.git
 cd home-browser-mcp
 ./setup.sh
 ```
 
 #### 🪟 Windows (Command Prompt or PowerShell):
 ```cmd
-git clone https://github.com/onlinegill/home-browser-mcp.git
+git clone https://github.com/davidjameshowell/home-browser-mcp.git
 cd home-browser-mcp
 setup.bat
 ```
