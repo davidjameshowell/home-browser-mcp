@@ -34,7 +34,8 @@ SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 VENV_DIR = os.path.join(SCRIPT_DIR, ".venv")
 VENV_BIN = os.path.join(VENV_DIR, "Scripts" if IS_WINDOWS else "bin")
 VENV_PYTHON = os.path.join(VENV_BIN, "python.exe" if IS_WINDOWS else "python")
-DEFAULT_PROFILE_DIR = os.path.expanduser("~/.home-browser-profile")
+DEFAULT_PROFILE_DIR = os.path.expanduser(os.environ.get("HBM_PROFILE_DIR", "~/.home-browser-profile"))
+PLAYWRIGHT_MCP = "@playwright/mcp@0.0.84"
 
 # Tailscale & System Utilities
 # =====================================================================
@@ -148,15 +149,14 @@ def cmd_setup(args):
         scrapling_cli = os.path.join(VENV_BIN, "scrapling")
     if os.path.exists(scrapling_cli):
         subprocess.run([scrapling_cli, "install"], check=True)
-    else:
-        subprocess.run([VENV_PYTHON, "-m", "patchright", "install", "chromium"], check=False)
+    subprocess.run([VENV_PYTHON, "-m", "patchright", "install", "chromium"], check=True)
 
     # 4. Optional Playwright MCP installation (if npm is available)
     print("\n[4/5] Checking Node.js / Playwright MCP...")
     if shutil.which("npm"):
         try:
             print("Installing @playwright/mcp globally or via npx...")
-            subprocess.run(["npx", "-y", "--package=@playwright/mcp@latest", "playwright", "install", "chromium"], check=True)
+            subprocess.run(["npx", "-y", "--package=" + PLAYWRIGHT_MCP, "playwright", "install", "chromium"], check=True)
             print("Playwright Chromium browser installed.")
         except Exception as e:
             print(f"Note: Playwright installation had notice (non-fatal): {e}")
@@ -338,6 +338,12 @@ def cmd_login(args):
     if not url.startswith("http://") and not url.startswith("https://"):
         url = "https://" + url
 
+    if args.cdp_endpoint:
+        from hbm_browser import open_url
+        open_url(args.cdp_endpoint, url)
+        print("Login tab opened in the shared browser. Use VNC/noVNC to complete login; leave the browser running.")
+        return
+
     profile_dir = os.path.expanduser(args.profile_dir)
     os.makedirs(profile_dir, exist_ok=True)
 
@@ -348,7 +354,7 @@ def cmd_login(args):
     print("\n👉 Log into your account (Amazon, etc.), solve any 2FA/SMS codes,")
     print("   and then simply CLOSE the browser window when finished.\n")
 
-    from playwright.sync_api import sync_playwright
+    from patchright.sync_api import sync_playwright
     with sync_playwright() as p:
         chrome_found = (
             os.path.exists("/Applications/Google Chrome.app")
@@ -371,8 +377,8 @@ def cmd_login(args):
             pass
         context.close()
 
-    print("\n✅ Success! Your login session and cookies are saved in ~/.home-browser-profile.")
-    print("   Muse and other bots will now automatically use your logged-in session!\n")
+    print(f"\nBrowser closed. Profile retained at {profile_dir}.")
+    print("Use the same profile with Playwright. Standalone Scrapling fetches use separate sessions.\n")
 
 
 # =====================================================================
@@ -436,32 +442,36 @@ def truncate_text(text: str, limit: int = MAX_OUT) -> str:
     return text[:limit] + ("...[truncated]" if len(text) > limit else "")
 
 
-def resolve_server_cmd(cmd_arg: str | None = None, host: str | None = None, engine: str = "scrapling") -> list[str]:
+def resolve_server_cmd(cmd_arg: str | None = None, host: str | None = None, engine: str = "scrapling",
+                       profile_dir: str | None = None, cdp_endpoint: str | None = None,
+                       headed: bool = False) -> list[str]:
     if cmd_arg:
         return shlex.split(cmd_arg)
     if os.environ.get("HBM_CMD"):
         return shlex.split(os.environ["HBM_CMD"])
 
-    host = host or os.environ.get("HBM_SSH_HOST")
+    host = os.environ.get("HBM_SSH_HOST") if host is None else host
     engine = os.environ.get("HBM_ENGINE", engine).lower()
 
-    if host:
-        if engine in ("scrapling", "stealth"):
-            return ["ssh", host, "scrapling-mcp"]
-        base = ["ssh", host, "npx", "-y", "@playwright/mcp", "--headless"]
-        if os.path.exists(DEFAULT_PROFILE_DIR):
-            base.extend(["--user-data-dir", "~/.home-browser-profile"])
-        return base
-
-    # Local fallback
     if engine in ("scrapling", "stealth"):
-        scrapling_bin = os.path.join(VENV_BIN, "scrapling-mcp")
-        if os.path.exists(scrapling_bin):
-            return [scrapling_bin]
-        return ["scrapling-mcp"]
-    base = ["npx", "-y", "@playwright/mcp", "--headless"]
-    if os.path.exists(DEFAULT_PROFILE_DIR):
-        base.extend(["--user-data-dir", DEFAULT_PROFILE_DIR])
+        base = ["scrapling-mcp"] if host else [get_scrapling_mcp_bin()]
+    elif engine == "playwright":
+        endpoint = cdp_endpoint or os.environ.get("HBM_CDP_ENDPOINT")
+        base = ["npx", "-y", PLAYWRIGHT_MCP]
+        if endpoint:
+            base.extend(["--cdp-endpoint", endpoint])
+        else:
+            if not headed:
+                base.append("--headless")
+            profile = profile_dir or os.environ.get("HBM_PROFILE_DIR") or ("~/.home-browser-profile" if host else DEFAULT_PROFILE_DIR)
+            base.extend(["--user-data-dir", profile if host else os.path.expanduser(profile)])
+    else:
+        raise ValueError(f"Unknown engine: {engine}")
+    if host:
+        # SSH executes one shell command remotely. Expand only a leading ~/ on
+        # that host and quote everything else, including paths with spaces.
+        remote = " ".join(('"$HOME"/' + shlex.quote(v[2:])) if v.startswith("~/") else shlex.quote(v) for v in base)
+        return ["ssh", "-T", host, remote]
     return base
 
 
@@ -469,7 +479,7 @@ async def run_mcp_plan(plan: list[dict], cmd: list[str]) -> list[dict]:
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
 
-    extra_env = {k: v for k, v in os.environ.items() if "proxy" in k.lower()}
+    extra_env = {k: v for k, v in os.environ.items() if "proxy" in k.lower() or k.startswith("HBM_") or k in ("DISPLAY", "XAUTHORITY", "SSH_AUTH_SOCK")}
     params = StdioServerParameters(command=cmd[0], args=cmd[1:], env=extra_env)
     results = []
     ref_map = {}
@@ -489,7 +499,7 @@ async def run_mcp_plan(plan: list[dict], cmd: list[str]) -> list[dict]:
                         results.append({"tool": name, "ok": False,
                                         "output": f"ERROR: no ref for {key}; run browser_snapshot first"})
                         continue
-                    args["target"] = ref
+                    args["ref"] = ref
                     args.setdefault("element", f"{key[0]} {key[1]}".strip())
 
                 try:
@@ -504,7 +514,8 @@ async def run_mcp_plan(plan: list[dict], cmd: list[str]) -> list[dict]:
 
 
 def cmd_drive(args):
-    cmd = resolve_server_cmd(cmd_arg=args.cmd, host=args.host, engine=args.engine)
+    cmd = resolve_server_cmd(cmd_arg=args.cmd, host=args.host, engine=args.engine,
+                             profile_dir=args.profile_dir, cdp_endpoint=args.cdp_endpoint, headed=args.headed)
     plan = json.load(sys.stdin)
     results = asyncio.run(run_mcp_plan(plan, cmd))
     out = {"results": results}
@@ -540,7 +551,8 @@ class HomeBrowser:
         except ImportError:
             if os.path.exists(VENV_PYTHON):
                 proc = subprocess.run(
-                    [VENV_PYTHON, os.path.join(SCRIPT_DIR, "hbm.py"), "drive", "--full"],
+                    [VENV_PYTHON, os.path.join(SCRIPT_DIR, "hbm.py"), "drive", "--full",
+                     "--cmd", shlex.join(server_cmd)],
                     input=json.dumps(plan),
                     text=True,
                     capture_output=True,
@@ -640,15 +652,26 @@ def main():
     drive_parser.add_argument("--engine", default="scrapling", help="Engine (scrapling or playwright)")
     drive_parser.add_argument("--out", default=None, help="File to write full JSON results")
     drive_parser.add_argument("--full", action="store_true", help="Output full JSON without truncation")
+    drive_parser.add_argument("--profile-dir", default=None, help="Persistent profile path on the browser host")
+    drive_parser.add_argument("--cdp-endpoint", default=None, help="Attach to a running shared browser (Playwright)")
+    drive_parser.add_argument("--headed", action="store_true", help="Launch a visible Playwright browser")
 
     # login
     login_parser = subparsers.add_parser("login", help="Open visible browser to log into Amazon/sites and save session")
     login_parser.add_argument("url", nargs="?", default="https://www.amazon.com", help="URL to log into (default: amazon.com)")
     login_parser.add_argument("--profile-dir", default=DEFAULT_PROFILE_DIR, help="Path to persistent browser profile")
+    login_parser.add_argument("--cdp-endpoint", default=os.environ.get("HBM_CDP_ENDPOINT"), help="Open login in the running shared browser")
 
     # serve
     serve_parser = subparsers.add_parser("serve", help="Run the MCP server directly")
     serve_parser.add_argument("--engine", default="scrapling", choices=["scrapling", "playwright"])
+    serve_parser.add_argument("--profile-dir", default=None)
+    serve_parser.add_argument("--cdp-endpoint", default=None)
+    serve_parser.add_argument("--headed", action="store_true")
+    browser_parser = subparsers.add_parser("browser", help="Run or inspect a persistent visible browser")
+    browser_parser.add_argument("action", choices=["run", "status"])
+    browser_parser.add_argument("--profile-dir", default=DEFAULT_PROFILE_DIR)
+    browser_parser.add_argument("--port", type=int, default=9222)
 
     # If no args or piped stdin without subcmd, default behavior
     if len(sys.argv) == 1:
@@ -679,15 +702,16 @@ def main():
         cmd_fetch(parsed)
     elif parsed.command == "drive":
         cmd_drive(parsed)
-    elif parsed.command == "serve":
-        if parsed.engine == "scrapling":
-            scrapling_bin = os.path.join(VENV_BIN, "scrapling-mcp")
-            os.execv(scrapling_bin if os.path.exists(scrapling_bin) else "scrapling-mcp", ["scrapling-mcp"])
+    elif parsed.command == "browser":
+        from hbm_browser import run_browser, browser_status
+        if parsed.action == "run":
+            run_browser(parsed.profile_dir, parsed.port)
         else:
-            npx_bin = shutil.which("npx")
-            if not npx_bin:
-                sys.exit("npm/npx not found")
-            os.execv(npx_bin, ["npx", "-y", "@playwright/mcp", "--headless"])
+            print(json.dumps(browser_status(f"http://127.0.0.1:{parsed.port}"), indent=2))
+    elif parsed.command == "serve":
+        cmd = resolve_server_cmd(host="", engine=parsed.engine, profile_dir=parsed.profile_dir,
+                                 cdp_endpoint=parsed.cdp_endpoint, headed=parsed.headed)
+        os.execvp(cmd[0], cmd)
     else:
         parser.print_help()
 

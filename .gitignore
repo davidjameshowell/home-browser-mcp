@@ -4,3 +4,13 @@ __pycache__/
 .playwright-mcp/
 result.json
 *.log
+# Never publish browser sessions or credentials.
+.env
+.env.*
+!.env.example
+*profile*/
+*storage-state*.json
+*.pass
+*.pem
+*.key
+node_modules/

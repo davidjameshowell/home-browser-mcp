@@ -54,9 +54,8 @@ def server_command():
     engine = os.environ.get("HBM_ENGINE", "playwright").lower()
     if "--engine" in sys.argv:
         engine = sys.argv[sys.argv.index("--engine") + 1].lower()
-    if engine in ("scrapling", "stealth"):
-        return ["ssh", host, "scrapling-mcp"]
-    return ["ssh", host, "npx", "-y", "@playwright/mcp", "--headless"]
+    from hbm import resolve_server_cmd
+    return resolve_server_cmd(host=host, engine=engine)
 
 
 def build_ref_map(text):
@@ -93,7 +92,7 @@ async def run(plan, cmd):
 
     # The MCP SDK only inherits an allowlisted env; pass proxy vars through
     # explicitly (needed when the server command itself uses a proxy).
-    extra_env = {k: v for k, v in os.environ.items() if "proxy" in k.lower()}
+    extra_env = {k: v for k, v in os.environ.items() if "proxy" in k.lower() or k.startswith("HBM_") or k in ("DISPLAY", "XAUTHORITY", "SSH_AUTH_SOCK")}
     params = StdioServerParameters(command=cmd[0], args=cmd[1:], env=extra_env)
     results = []
     ref_map = {}
@@ -115,7 +114,7 @@ async def run(plan, cmd):
                                                   "run browser_snapshot first"})
                         continue
                     # @playwright/mcp takes the snapshot ref as "target".
-                    args["target"] = ref
+                    args["ref"] = ref
                     args.setdefault("element", f"{key[0]} {key[1]}".strip())
                 try:
                     res = await session.call_tool(name, args)

@@ -1,5 +1,31 @@
 # Home-Browser MCP
 
+## Persistent browser and graphical access extension
+
+This fork retains the upstream Scrapling and Playwright functionality and adds
+an optional persistent, visible browser with private VNC/noVNC access. Complete
+logins and MFA yourself, then let an agent continue in the same browser context.
+
+See **[Persistent browser setup and client integration](docs/persistent-browser.md)**
+for the Linux installer, SSH tunnel, profile management, and Meta Muse handoff.
+
+```bash
+# Ubuntu/Debian browser host; run as a regular user with sudo access
+bash deploy/linux/install.sh
+./hbm login https://example.com/login --cdp-endpoint http://127.0.0.1:9222
+./hbm serve --engine playwright --cdp-endpoint http://127.0.0.1:9222
+```
+
+**Session clarification:** the upstream text below describes automatic login
+reuse and anti-bot bypass broadly. In this extension, saved account access is
+provided by the shared Playwright browser. Standalone Scrapling fetches retain
+their separate sessions; they do not automatically inherit that profile.
+Website challenges can still require manual intervention.
+
+The original project is [onlinegill/home-browser-mcp](https://github.com/onlinegill/home-browser-mcp).
+Its history and attribution are retained. The upstream repository has no LICENSE
+file at the fork point; no new license is asserted for its code.
+
 Browse the web through your **home residential IP** — bypass datacenter bans, Cloudflare Turnstile, and anti-bot walls for **Muse, Groq bots, cloud agents, and AI assistants**.
 
 ---
